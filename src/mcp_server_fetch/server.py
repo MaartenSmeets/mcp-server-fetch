@@ -3,6 +3,11 @@ from urllib.parse import urlparse, urlunparse
 import logging
 import sys
 import time
+import io
+import os
+import re
+import hashlib
+import tempfile
 
 import markdownify
 import readabilipy.simple_json
@@ -20,14 +25,45 @@ from mcp.types import (
     INVALID_PARAMS,
     INTERNAL_ERROR,
 )
-from protego import Protego
+# Removed robots.txt related import
 from pydantic import BaseModel, Field, AnyUrl
+
+# Additional imports for browser automation and OCR
+import requests
+from bs4 import BeautifulSoup
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+import numpy as np
+from PIL import Image
+import pytesseract
 
 # Set up logger
 logger = logging.getLogger("mcp-fetch")
 
 DEFAULT_USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)"
 DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)"
+
+# Try to import layoutparser, but don't fail if it's not available
+try:
+    import layoutparser as lp
+    LAYOUT_PARSER_AVAILABLE = True
+except ModuleNotFoundError:
+    lp = None
+    LAYOUT_PARSER_AVAILABLE = False
+    logger.warning("layoutparser not installed. Layout detection is disabled.")
+
+
+def _cleanup_extracted_text(text: str) -> str:
+    """Clean up extracted text by stripping blank lines and extra whitespace."""
+    lines = [line.strip() for line in text.splitlines()]
+    # Remove empty lines and consecutive duplicates
+    clean_lines = []
+    prev_line = None
+    for line in lines:
+        if line and line != prev_line:
+            clean_lines.append(line)
+            prev_line = line
+    return "\n".join(clean_lines)
 
 
 def extract_content_from_html(html: str) -> str:
@@ -77,143 +113,251 @@ def get_robots_txt_url(url: str) -> str:
     logger.debug("Generated robots.txt URL: %s from base URL: %s", robots_url, url)
     return robots_url
 
+# Removed check_may_autonomously_fetch_url function since robots.txt check is no longer needed.
 
-async def check_may_autonomously_fetch_url(url: str, user_agent: str) -> None:
+
+def _capture_screenshot(url: str) -> Tuple[bytes, str]:
     """
-    Check if the URL can be fetched by the user agent according to the robots.txt file.
-    Raises a McpError if not.
+    Capture a full-page screenshot and page source using undetected-chromedriver.
+    It also clicks common cookie banners before capturing.
     """
-    from httpx import AsyncClient, HTTPError
+    try:
+        logger.debug("Launching undetected-chromedriver for screenshot capture.")
+        options = uc.ChromeOptions()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        
+        driver = uc.Chrome(options=options)
+        driver.set_page_load_timeout(30)
+        
+        logger.debug(f"Navigating to {url}")
+        driver.get(url)
+        time.sleep(5)  # Wait for dynamic content to load
+        
+        # Common cookie banner selectors
+        cookie_selectors = [
+            "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+            "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'agree')]",
+            "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'got it')]",
+            "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'allow')]",
+            "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'consent')]",
+            "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'cookies')]",
+            "button#onetrust-accept-btn-handler",
+            "button.accept-cookies",
+            "button.cookie-accept",
+            "button.cookie-consent-accept",
+            "button.cookie-banner__accept",
+            "#cookie-accept-btn",
+            "#cookie-banner-accept",
+            "#gdpr-cookie-accept",
+            ".cookie-banner .accept-button",
+            ".cookie-consent .accept-button"
+        ]
+        
+        for selector in cookie_selectors:
+            try:
+                if selector.startswith("/"):
+                    elements = driver.find_elements(By.XPATH, selector)
+                    for elem in elements:
+                        if elem.is_displayed():
+                            try:
+                                driver.execute_script("arguments[0].click();", elem)
+                                logger.debug(f"Clicked cookie banner using XPath: {selector}")
+                                time.sleep(1)
+                                break
+                            except Exception as click_e:
+                                logger.debug(f"Click error for XPath {selector}: {click_e}")
+                else:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    for elem in elements:
+                        if elem.is_displayed():
+                            try:
+                                driver.execute_script("arguments[0].click();", elem)
+                                logger.debug(f"Clicked cookie banner using CSS: {selector}")
+                                time.sleep(1)
+                                break
+                            except Exception as click_e:
+                                logger.debug(f"Click error for CSS {selector}: {click_e}")
+            except Exception as e:
+                logger.debug(f"Selector {selector} not found: {e}")
+        
+        total_height = driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
+        driver.set_window_size(1920, total_height)
+        logger.debug(f"Adjusted window size to 1920x{total_height}")
+        time.sleep(2)
+        
+        screenshot = driver.get_screenshot_as_png()
+        logger.debug("Screenshot captured")
+        
+        page_source = driver.page_source
+        logger.debug(f"Page source captured, length: {len(page_source)}")
+        
+        driver.quit()
+        return screenshot, page_source
+    except Exception as e:
+        logger.exception(f"Screenshot capture failed: {e}")
+        return None, None
 
-    logger.info("Checking if URL can be autonomously fetched: %s", url)
-    robot_txt_url = get_robots_txt_url(url)
 
-    async with AsyncClient() as client:
+def _extract_text_with_pytesseract(image_bytes: bytes) -> str:
+    """Use pytesseract with layout detection to OCR the screenshot."""
+    try:
+        logger.debug("Extracting text with pytesseract using layout detection.")
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        if LAYOUT_PARSER_AVAILABLE and lp is not None:
+            logger.debug("layoutparser is available.")
+            # Initialize Layout Parser model (using a public model from PubLayNet)
+            try:
+                model = lp.Detectron2LayoutModel(
+                    config_path='/app/weights/config.yml',
+                    model_path='/app/weights/model_final.pth',
+                    extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.5],
+                    label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
+                )
+                # Convert PIL image to numpy array for layoutparser
+                image_np = np.array(pil_image)
+                layout = model.detect(image_np)
+                logger.debug("Layoutparser successfully detected layout.")
+                extracted_text = ""
+                text_blocks = [block for block in layout if block.type == "Text"]
+                if text_blocks:
+                    for block in text_blocks:
+                        x_1, y_1, x_2, y_2 = block.coordinates
+                        cropped_pil = pil_image.crop((int(x_1), int(y_1), int(x_2), int(y_2)))
+                        txt = pytesseract.image_to_string(cropped_pil)
+                        extracted_text += txt + "\n"
+                else:
+                    extracted_text = pytesseract.image_to_string(pil_image)
+            except Exception as e:
+                logger.warning(f"Layout parser model loading failed: {e}. Using basic OCR instead.")
+                extracted_text = pytesseract.image_to_string(pil_image)
+        else:
+            logger.warning("layoutparser is not available. Falling back to basic pytesseract OCR.")
+            extracted_text = pytesseract.image_to_string(pil_image)
+        return _cleanup_extracted_text(extracted_text)
+    except Exception as e:
+        logger.exception(f"Pytesseract extraction with layout detection failed: {e}")
+        return ""
+
+
+def extract_html_with_requests(url: str) -> str:
+    """Extract HTML content using requests and BeautifulSoup."""
+    try:
+        logger.debug("Extracting HTML using requests/BeautifulSoup.")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return ""
+        soup = BeautifulSoup(response.text, "html.parser")
+        for element in soup(["script", "style", "header", "footer", "nav"]):
+            element.decompose()
+        text = soup.get_text(separator="\n")
+        return _cleanup_extracted_text(text)
+    except Exception as e:
+        logger.exception(f"HTML extraction failed: {e}")
+        return ""
+
+
+def choose_best_result(results: list) -> Tuple[str, str]:
+    """Choose the result with the longest nonempty text."""
+    valid_results = [(name, text) for name, text in results if text and text.strip()]
+    if not valid_results:
+        return "none", ""
+    
+    sorted_results = sorted(valid_results, key=lambda x: len(x[1]), reverse=True)
+    
+    for name, text in sorted_results:
+        if name in ["Method_1_Selenium_UC", "Method_3_HTML_Requests"] and len(text) > 100:
+            return name, text
+    
+    return sorted_results[0]
+
+
+async def fetch_url_with_multiple_methods(url: str, user_agent: str) -> Tuple[str, str]:
+    """
+    Fetch the URL using multiple methods and return the best result.
+    """
+    extracted_texts = {}
+    
+    # Method 1: Selenium/undetected-chromedriver extraction
+    logger.info("Attempting to fetch URL with Selenium/undetected-chromedriver: %s", url)
+    screenshot_bytes, page_source = _capture_screenshot(url)
+    if page_source:
         try:
-            logger.debug("Fetching robots.txt from %s with User-Agent: %s", robot_txt_url, user_agent)
-            response = await client.get(
-                robot_txt_url,
-                follow_redirects=True,
-                headers={"User-Agent": user_agent},
-            )
-            logger.debug("Robots.txt fetch status: %d", response.status_code)
-        except HTTPError as e:
-            logger.error("Failed to fetch robots.txt: %s", str(e))
-            raise McpError(ErrorData(
-                code=INTERNAL_ERROR,
-                message=f"Failed to fetch robots.txt {robot_txt_url} due to a connection issue",
-            ))
-        if response.status_code in (401, 403):
-            logger.warning("Access to robots.txt denied with status code: %d", response.status_code)
-            raise McpError(ErrorData(
-                code=INTERNAL_ERROR,
-                message=f"When fetching robots.txt ({robot_txt_url}), received status {response.status_code} so assuming that autonomous fetching is not allowed, the user can try manually fetching by using the fetch prompt",
-            ))
-        elif 400 <= response.status_code < 500:
-            logger.info("robots.txt not found (status %d) - proceeding with fetch", response.status_code)
-            return
-        robot_txt = response.text
-    
-    logger.debug("Retrieved robots.txt content (length: %d bytes)", len(robot_txt))
-    processed_robot_txt = "\n".join(
-        line for line in robot_txt.splitlines() if not line.strip().startswith("#")
-    )
-    robot_parser = Protego.parse(processed_robot_txt)
-    
-    can_fetch = robot_parser.can_fetch(str(url), user_agent)
-    logger.info("Robots.txt check result: can_fetch=%s for URL=%s with User-Agent=%s", 
-                can_fetch, url, user_agent)
-    
-    if not can_fetch:
-        logger.warning("URL fetch blocked by robots.txt: %s", url)
-        raise McpError(ErrorData(
-            code=INTERNAL_ERROR,
-            message=f"The sites robots.txt ({robot_txt_url}), specifies that autonomous fetching of this page is not allowed, "
-            f"<useragent>{user_agent}</useragent>\n"
-            f"<url>{url}</url>"
-            f"<robots>\n{robot_txt}\n</robots>\n"
-            f"The assistant must let the user know that it failed to view the page. The assistant may provide further guidance based on the above information.\n"
-            f"The assistant can tell the user that they can try manually fetching the page by using the fetch prompt within their UI.",
-        ))
+            soup = BeautifulSoup(page_source, "html.parser")
+            for element in soup(["script", "style", "header", "footer", "nav"]):
+                element.decompose()
+            text_content = _cleanup_extracted_text(soup.get_text(separator="\n"))
+            extracted_texts["Method_1_Selenium_UC"] = text_content
+        except Exception as e:
+            logger.error("Failed to process page source: %s", str(e))
+            extracted_texts["Method_1_Selenium_UC"] = ""
+    else:
+        extracted_texts["Method_1_Selenium_UC"] = ""
 
-
-async def fetch_url(
-    url: str, user_agent: str, force_raw: bool = False
-) -> Tuple[str, str]:
-    """
-    Fetch the URL and return the content in a form ready for the LLM, as well as a prefix string with status information.
-    """
-    from httpx import AsyncClient, HTTPError
-    
-    logger.info("Fetching URL: %s (force_raw=%s)", url, force_raw)
-    start_time = time.time()
-    
-    async with AsyncClient() as client:
+    # Method 2: OCR with pytesseract on the screenshot
+    if screenshot_bytes:
         try:
-            logger.debug("Making HTTP request to %s with User-Agent: %s", url, user_agent)
+            text_ocr = _extract_text_with_pytesseract(screenshot_bytes)
+            extracted_texts["Method_2_Pytesseract_OCR"] = text_ocr
+        except Exception as e:
+            logger.error("Failed to extract text with OCR: %s", str(e))
+            extracted_texts["Method_2_Pytesseract_OCR"] = ""
+    else:
+        extracted_texts["Method_2_Pytesseract_OCR"] = ""
+
+    # Method 3: HTML extraction using requests as fallback
+    try:
+        text_requests = extract_html_with_requests(url)
+        extracted_texts["Method_3_HTML_Requests"] = text_requests
+    except Exception as e:
+        logger.error("Failed to extract HTML with requests: %s", str(e))
+        extracted_texts["Method_3_HTML_Requests"] = ""
+
+    # Method 4: Original method from the existing code
+    try:
+        from httpx import AsyncClient, HTTPError
+        async with AsyncClient() as client:
             response = await client.get(
                 url,
                 follow_redirects=True,
                 headers={"User-Agent": user_agent},
                 timeout=30,
             )
-            logger.debug("URL fetch completed with status: %d in %.2f seconds", 
-                       response.status_code, time.time() - start_time)
-        except HTTPError as e:
-            logger.error("Failed to fetch URL %s: %s", url, str(e))
-            raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to fetch {url}: {e!r}"))
-        if response.status_code >= 400:
-            logger.error("URL fetch failed with status code: %d", response.status_code)
-            raise McpError(ErrorData(
-                code=INTERNAL_ERROR,
-                message=f"Failed to fetch {url} - status code {response.status_code}",
-            ))
+            if response.status_code < 400:
+                raw_content = response.text
+                content_type = response.headers.get("content-type", "")
+                is_page_html = (
+                    "<html" in raw_content[:100] or "text/html" in content_type or not content_type
+                )
+                if is_page_html:
+                    extracted_texts["Method_4_Original"] = extract_content_from_html(raw_content)
+                else:
+                    extracted_texts["Method_4_Original"] = raw_content
+            else:
+                extracted_texts["Method_4_Original"] = ""
+    except Exception as e:
+        logger.error("Failed to extract content with original method: %s", str(e))
+        extracted_texts["Method_4_Original"] = ""
 
-        page_raw = response.text
-        logger.debug("Retrieved raw content (length: %d bytes)", len(page_raw))
+    # Choose the best result
+    best_method, best_text = choose_best_result(list(extracted_texts.items()))
+    logger.info("Selected extraction method: %s", best_method)
 
-    content_type = response.headers.get("content-type", "")
-    is_page_html = (
-        "<html" in page_raw[:100] or "text/html" in content_type or not content_type
-    )
-    logger.debug("Content type: %s, is_html: %s", content_type, is_page_html)
-
-    if is_page_html and not force_raw:
-        logger.info("Converting HTML to Markdown for URL: %s", url)
-        content, prefix = extract_content_from_html(page_raw), ""
-    else:
-        logger.info("Returning raw content for URL: %s", url)
-        content, prefix = (
-            page_raw,
-            f"Content type {content_type} cannot be simplified to markdown, but here is the raw content:\n",
-        )
-    
-    logger.debug("Fetch completed for %s in %.2f seconds (result length: %d bytes)", 
-                url, time.time() - start_time, len(content))
-    return content, prefix
+    # Return the best result with a prefix indicating the method used
+    prefix = f"Content extracted using {best_method}:\n\n"
+    return best_text, prefix
 
 
 class Fetch(BaseModel):
     """Parameters for fetching a URL."""
 
     url: Annotated[AnyUrl, Field(description="URL to fetch")]
-    max_length: Annotated[
-        int,
-        Field(
-            default=5000,
-            description="Maximum number of characters to return.",
-            gt=0,
-            lt=1000000,
-        ),
-    ]
-    start_index: Annotated[
-        int,
-        Field(
-            default=0,
-            description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.",
-            ge=0,
-        ),
-    ]
     raw: Annotated[
         bool,
         Field(
@@ -224,13 +368,12 @@ class Fetch(BaseModel):
 
 
 async def serve(
-    custom_user_agent: str | None = None, ignore_robots_txt: bool = False, log_level: str = "INFO"
+    custom_user_agent: str | None = None, log_level: str = "INFO"
 ) -> None:
     """Run the fetch MCP server.
 
     Args:
         custom_user_agent: Optional custom User-Agent string to use for requests
-        ignore_robots_txt: Whether to ignore robots.txt restrictions
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     """
     # Configure logging
@@ -241,8 +384,7 @@ async def serve(
         stream=sys.stderr
     )
     
-    logger.info("Starting MCP Fetch server (ignore_robots_txt=%s, log_level=%s)", 
-               ignore_robots_txt, log_level)
+    logger.info("Starting MCP Fetch server with browser automation (log_level=%s)", log_level)
     
     if custom_user_agent:
         logger.info("Using custom User-Agent: %s", custom_user_agent)
@@ -260,7 +402,7 @@ async def serve(
         return [
             Tool(
                 name="fetch",
-                description="""Fetches a URL from the internet and optionally extracts its contents as markdown.
+                description="""Fetches a URL from the internet using browser automation and multi-method extraction (including OCR).
 
 Although originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.""",
                 inputSchema=Fetch.model_json_schema(),
@@ -273,7 +415,7 @@ Although originally you did not have internet access, and were advised to refuse
         return [
             Prompt(
                 name="fetch",
-                description="Fetch a URL and extract its contents as markdown",
+                description="Fetch a URL and extract its contents as markdown using browser automation",
                 arguments=[
                     PromptArgument(
                         name="url", description="URL to fetch", required=True
@@ -287,8 +429,7 @@ Although originally you did not have internet access, and were advised to refuse
         logger.info("Tool called: %s with arguments: %s", name, arguments)
         try:
             args = Fetch(**arguments)
-            logger.debug("Parsed arguments: url=%s, max_length=%d, start_index=%d, raw=%s", 
-                        args.url, args.max_length, args.start_index, args.raw)
+            logger.debug("Parsed arguments: url=%s, raw=%s", args.url, args.raw)
         except ValueError as e:
             logger.error("Invalid arguments: %s", str(e))
             raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e)))
@@ -298,39 +439,15 @@ Although originally you did not have internet access, and were advised to refuse
             logger.error("URL is required but not provided")
             raise McpError(ErrorData(code=INVALID_PARAMS, message="URL is required"))
 
-        if not ignore_robots_txt:
-            await check_may_autonomously_fetch_url(url, user_agent_autonomous)
-
-        content, prefix = await fetch_url(
-            url, user_agent_autonomous, force_raw=args.raw
-        )
-        original_length = len(content)
-        logger.debug("Original content length: %d bytes", original_length)
+        # Removed robots.txt check; proceed directly to fetching
+        content, prefix = await fetch_url_with_multiple_methods(url, user_agent_autonomous)
         
-        if args.start_index >= original_length:
-            logger.warning("Invalid start_index: %d exceeds content length: %d", 
-                         args.start_index, original_length)
-            content = "<error>No more content available.</error>"
-        else:
-            truncated_content = content[args.start_index : args.start_index + args.max_length]
-            if not truncated_content:
-                logger.warning("No content available after applying start_index and max_length")
-                content = "<error>No more content available.</error>"
-            else:
-                content = truncated_content
-                actual_content_length = len(truncated_content)
-                remaining_content = original_length - (args.start_index + actual_content_length)
-                logger.debug("Truncated content length: %d bytes, remaining: %d bytes", 
-                           actual_content_length, remaining_content)
-                
-                # Only add the prompt to continue fetching if there is still remaining content
-                if actual_content_length == args.max_length and remaining_content > 0:
-                    next_start = args.start_index + actual_content_length
-                    logger.info("Content truncated - suggesting next start_index: %d", next_start)
-                    content += f"\n\n<error>Content truncated. Call the fetch tool with a start_index of {next_start} to get more content.</error>"
+        if not content:
+            logger.warning("No content extracted from URL: %s", url)
+            content = "<error>Failed to extract content from the URL. The page might be empty, require authentication, or use techniques that prevent automated access.</error>"
         
         logger.info("Returning fetched content for URL: %s (length: %d bytes)", url, len(content))
-        return [TextContent(type="text", text=f"{prefix}Contents of {url}:\n{content}")]
+        return [TextContent(type="text", text=f"{prefix}Contents of {url}:\n\n{content}")]
 
     @server.get_prompt()
     async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
@@ -343,7 +460,10 @@ Although originally you did not have internet access, and were advised to refuse
         logger.debug("Prompt URL: %s", url)
 
         try:
-            content, prefix = await fetch_url(url, user_agent_manual)
+            content, prefix = await fetch_url_with_multiple_methods(url, user_agent_manual)
+            if not content:
+                logger.warning("No content extracted from URL: %s", url)
+                content = "<error>Failed to extract content from the URL. The page might be empty, require authentication, or use techniques that prevent automated access.</error>"
             logger.info("Successfully fetched content for prompt URL: %s (length: %d bytes)", 
                       url, len(content))
         except McpError as e:
