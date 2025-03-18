@@ -1,0 +1,12 @@
+# Create log directory
+mkdir -p logs
+
+# Build the image
+docker build -t mcp-server-fetch .
+
+# Run with stdin kept open and log volume mounted
+docker run -i --rm \
+  -v "$(pwd)/logs:/app/logs" \
+  mcp-server-fetch
+
+#docker system prune --all --volumes

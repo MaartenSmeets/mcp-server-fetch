@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+      "fetch": {
+        "command": "docker",
+        "args": [
+          "run",
+          "--rm",
+          "-i",
+          "mcp-server-fetch"
+        ],
+        "disabled": false,
+        "alwaysAllow": []
+      }
+    }
+  }
