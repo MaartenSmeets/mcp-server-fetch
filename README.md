@@ -1,3 +1,4 @@
+![Fetch MCP Logo](https://raw.githubusercontent.com/MaartenSmeets/mcp-server-fetch/main/logo.png)
 # Fetch MCP Server
 
 A Model Context Protocol server that provides web content fetching capabilities using browser automation, OCR, and multiple extraction methods. This server enables LLMs to retrieve and process content from web pages, even those that require JavaScript rendering or use techniques that prevent simple scraping.
