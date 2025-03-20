@@ -1,21 +1,25 @@
 # Fetch MCP Server
 
-A Model Context Protocol server that provides web content fetching capabilities. This server enables LLMs to retrieve and process content from web pages, converting HTML to markdown for easier consumption.
-
-The fetch tool will truncate the response, but by using the `start_index` argument, you can specify where to start the content extraction. This lets models read a webpage in chunks, until they find the information they need.
+A Model Context Protocol server that provides web content fetching capabilities using browser automation, OCR, and multiple extraction methods. This server enables LLMs to retrieve and process content from web pages, even those that require JavaScript rendering or use techniques that prevent simple scraping.
 
 ### Available Tools
 
-- `fetch` - Fetches a URL from the internet and extracts its contents as markdown.
+- `fetch` - Fetches a URL from the internet using browser automation and multi-method extraction (including OCR).
     - `url` (string, required): URL to fetch
-    - `max_length` (integer, optional): Maximum number of characters to return (default: 5000)
-    - `start_index` (integer, optional): Start content from this character index (default: 0)
-    - `raw` (boolean, optional): Get raw content without markdown conversion (default: false)
+    - `raw` (boolean, optional): Get the actual HTML content if the requested page, without simplification (default: false)
+
+The server uses multiple methods to extract content:
+1. Browser automation with undetected-chromedriver
+2. OCR using pytesseract with layout detection
+3. HTML extraction using requests/BeautifulSoup
+4. Original markdown conversion method
+
+The server automatically selects the best result based on content quality and length.
 
 ### Prompts
 
 - **fetch**
-  - Fetch a URL and extract its contents as markdown
+  - Fetch a URL and extract its contents as markdown using browser automation
   - Arguments:
     - `url` (string, required): URL to fetch
 
@@ -72,6 +76,15 @@ ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotoc
 ```
 
 This can be customized by adding the argument `--user-agent=YourUserAgent` to the `args` list in the configuration.
+
+### Browser Automation and OCR
+
+The server now includes advanced content extraction capabilities:
+
+- Automated handling of cookie consent banners
+- Full-page screenshot capture
+- OCR with layout detection using pytesseract
+- Multiple extraction methods with automatic selection of best results
 
 ## Contributing
 
