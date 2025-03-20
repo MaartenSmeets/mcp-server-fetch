@@ -264,18 +264,56 @@ def extract_html_with_requests(url: str) -> str:
 
 
 def choose_best_result(results: list) -> Tuple[str, str]:
-    """Choose the result with the longest nonempty text."""
+    """Choose the best result based on multiple quality criteria."""
+    # Filter out empty results
     valid_results = [(name, text) for name, text in results if text and text.strip()]
     if not valid_results:
         return "none", ""
     
-    sorted_results = sorted(valid_results, key=lambda x: len(x[1]), reverse=True)
+    def score_content(name: str, text: str) -> float:
+        """Score content based on multiple quality criteria."""
+        score = 0.0
+        text_length = len(text)
+        
+        # Base score from content length (max 50 points)
+        score += min(text_length / 100, 50)
+        
+        # Bonus points for structured content (max 20 points)
+        if text.count('\n') > 0:
+            paragraphs = text.count('\n\n')
+            score += min(paragraphs, 20)
+        
+        # Method-specific scoring adjustments
+        method_weights = {
+            "Method_1_Selenium_UC": 1.2,  # Preferred for dynamic content
+            "Method_3_HTML_Requests": 1.1,  # Good for static content
+            "Method_2_Pytesseract_OCR": 0.9,  # Less reliable but useful for images
+            "Method_4_Original": 1.0  # Baseline
+        }
+        score *= method_weights.get(name, 1.0)
+        
+        # Penalize extremely short content
+        if text_length < 100:
+            score *= 0.5
+        
+        # Penalize likely error messages or invalid content
+        error_indicators = ['<error>', 'failed to', 'error occurred', 'access denied']
+        if any(indicator in text.lower() for indicator in error_indicators):
+            score *= 0.1
+            
+        return score
     
-    for name, text in sorted_results:
-        if name in ["Method_1_Selenium_UC", "Method_3_HTML_Requests"] and len(text) > 100:
-            return name, text
+    # Score and sort results
+    scored_results = [(name, text, score_content(name, text))
+                     for name, text in valid_results]
+    sorted_results = sorted(scored_results, key=lambda x: x[2], reverse=True)
     
-    return sorted_results[0]
+    # Log scores for debugging
+    logger.debug("Content scoring results:")
+    for name, _, score in sorted_results:
+        logger.debug(f"{name}: {score:.2f}")
+    
+    return sorted_results[0][0], sorted_results[0][1]
 
 
 async def fetch_url_with_multiple_methods(url: str, user_agent: str) -> Tuple[str, str]:

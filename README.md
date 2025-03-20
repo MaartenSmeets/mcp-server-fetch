@@ -15,7 +15,28 @@ The server uses multiple methods to extract content:
 3. HTML extraction using requests/BeautifulSoup
 4. Original markdown conversion method
 
-The server automatically selects the best result based on content quality and length.
+The server uses a sophisticated scoring system to select the best result, considering:
+
+1. Base content score (up to 50 points)
+   - Points awarded based on content length (1 point per 100 characters, max 50)
+   - Penalizes extremely short content (<100 characters)
+
+2. Structure bonus (up to 20 points)
+   - Awards points for well-structured content with paragraphs
+   - More paragraphs indicate better content organization
+
+3. Method-specific weighting
+   - Browser automation (Selenium/UC): 1.2x - Best for dynamic content
+   - HTML Requests (BeautifulSoup): 1.1x - Good for static content
+   - OCR (pytesseract): 0.9x - Less reliable but useful for images
+   - Original method: 1.0x - Baseline performance
+
+4. Quality penalties
+   - Detects and penalizes error messages
+   - Reduces score for content containing error indicators
+   - Validates content structure and readability
+
+The scoring system ensures the most reliable and high-quality content is selected, regardless of the extraction method used. Debug logging is available to track scoring decisions.
 
 ### Prompts
 
