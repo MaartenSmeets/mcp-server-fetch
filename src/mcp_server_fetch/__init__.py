@@ -12,11 +12,6 @@ def main():
     )
     parser.add_argument("--user-agent", type=str, help="Custom User-Agent string")
     parser.add_argument(
-        "--ignore-robots-txt",
-        action="store_true",
-        help="Ignore robots.txt restrictions",
-    )
-    parser.add_argument(
         "--log-level",
         type=str,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -41,7 +36,7 @@ def main():
         )
         print(f"Logging to file: {args.log_file} at level {args.log_level}")
     
-    asyncio.run(serve(args.user_agent, args.ignore_robots_txt, args.log_level))
+    asyncio.run(serve(args.user_agent, args.log_level))
 
 
 if __name__ == "__main__":

@@ -42,19 +42,22 @@ To install and run `mcp-server-fetch` using Docker, follow these steps:
 Add to your Claude settings:
 
 ```json
-"mcpServers": {
-  "fetch": {
-    "command": "docker",
-    "args": ["run", "-i", "--rm", "mcp/fetch"]
+{
+  "mcpServers": {
+    "fetch": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "mcp-server-fetch"
+      ],
+      "disabled": false,
+      "alwaysAllow": []
+    }
   }
 }
 ```
-
-### Customization - robots.txt
-
-By default, the server will obey a websites robots.txt file if the request came from the model (via a tool), but not if
-the request was user initiated (via a prompt). This can be disabled by adding the argument `--ignore-robots-txt` to the
-`args` list in the configuration.
 
 ### Customization - User-agent
 
