@@ -283,15 +283,6 @@ def choose_best_result(results: list) -> Tuple[str, str]:
             paragraphs = text.count('\n\n')
             score += min(paragraphs, 20)
         
-        # Method-specific scoring adjustments
-        method_weights = {
-            "Method_1_Selenium_UC": 1.2,  # Preferred for dynamic content
-            "Method_3_HTML_Requests": 1.1,  # Good for static content
-            "Method_2_Pytesseract_OCR": 0.9,  # Less reliable but useful for images
-            "Method_4_Original": 1.0  # Baseline
-        }
-        score *= method_weights.get(name, 1.0)
-        
         # Penalize extremely short content
         if text_length < 100:
             score *= 0.5

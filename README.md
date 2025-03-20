@@ -25,13 +25,7 @@ The server uses a sophisticated scoring system to select the best result, consid
    - Awards points for well-structured content with paragraphs
    - More paragraphs indicate better content organization
 
-3. Method-specific weighting
-   - Browser automation (Selenium/UC): 1.2x - Best for dynamic content
-   - HTML Requests (BeautifulSoup): 1.1x - Good for static content
-   - OCR (pytesseract): 0.9x - Less reliable but useful for images
-   - Original method: 1.0x - Baseline performance
-
-4. Quality penalties
+3. Quality penalties
    - Detects and penalizes error messages
    - Reduces score for content containing error indicators
    - Validates content structure and readability
