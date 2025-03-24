@@ -13,7 +13,8 @@ The server uses multiple methods to extract content:
 1. Browser automation with undetected-chromedriver
 2. OCR using pytesseract with layout detection
 3. HTML extraction using requests/BeautifulSoup
-4. Original markdown conversion method
+4. Document parsing (PDF, DOCX, PPTX)
+5. Original markdown conversion method
 
 The server uses a sophisticated scoring system to select the best result, considering:
 

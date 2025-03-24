@@ -1,4 +1,4 @@
-from typing import Annotated, Tuple
+from typing import Annotated, Tuple, Optional
 from urllib.parse import urlparse, urlunparse
 import logging
 import sys
@@ -8,8 +8,13 @@ import os
 import re
 import hashlib
 import tempfile
+import mimetypes
+from pathlib import Path
 
 import markdownify
+import docx
+import PyPDF2
+from pptx import Presentation
 import readabilipy.simple_json
 from mcp.shared.exceptions import McpError
 from mcp.server import Server
@@ -263,6 +268,138 @@ def extract_html_with_requests(url: str) -> str:
         return ""
 
 
+def _parse_pdf(content: bytes) -> str:
+    """Parse PDF content and extract text.
+    
+    Args:
+        content: Raw PDF file content as bytes
+        
+    Returns:
+        Extracted text content
+    """
+    try:
+        logger.debug("Parsing PDF content")
+        pdf_file = io.BytesIO(content)
+        reader = PyPDF2.PdfReader(pdf_file)
+        
+        extracted_text = []
+        for page_num in range(len(reader.pages)):
+            page = reader.pages[page_num]
+            extracted_text.append(page.extract_text())
+            
+        text = "\n\n".join(extracted_text)
+        return _cleanup_extracted_text(text)
+    except Exception as e:
+        logger.error(f"Failed to parse PDF: {str(e)}")
+        return ""
+
+def _parse_docx(content: bytes) -> str:
+    """Parse DOCX content and extract text.
+    
+    Args:
+        content: Raw DOCX file content as bytes
+        
+    Returns:
+        Extracted text content
+    """
+    try:
+        logger.debug("Parsing DOCX content")
+        docx_file = io.BytesIO(content)
+        doc = docx.Document(docx_file)
+        
+        # Extract text from paragraphs
+        paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
+        
+        # Extract text from tables
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = ' | '.join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if row_text:
+                    paragraphs.append(row_text)
+        
+        text = "\n\n".join(paragraphs)
+        return _cleanup_extracted_text(text)
+    except Exception as e:
+        logger.error(f"Failed to parse DOCX: {str(e)}")
+        return ""
+
+def _parse_pptx(content: bytes) -> str:
+    """Parse PPTX content and extract text.
+    
+    Args:
+        content: Raw PPTX file content as bytes
+        
+    Returns:
+        Extracted text content
+    """
+    try:
+        logger.debug("Parsing PPTX content")
+        pptx_file = io.BytesIO(content)
+        prs = Presentation(pptx_file)
+        
+        text_parts = []
+        
+        for slide_num, slide in enumerate(prs.slides, 1):
+            slide_parts = [f"Slide {slide_num}:"]
+            
+            # Get text from shapes (including text boxes)
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    slide_parts.append(shape.text.strip())
+                    
+            # Add notes if they exist
+            if slide.notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+                slide_parts.append(f"Notes: {slide.notes_slide.notes_text_frame.text.strip()}")
+                
+            if len(slide_parts) > 1:  # Only add slides that have content
+                text_parts.append("\n".join(slide_parts))
+        
+        text = "\n\n".join(text_parts)
+        return _cleanup_extracted_text(text)
+    except Exception as e:
+        logger.error(f"Failed to parse PPTX: {str(e)}")
+        return ""
+
+def _get_content_type(url: str, headers: Optional[dict] = None) -> str:
+    """Determine content type from URL and/or headers.
+    
+    Args:
+        url: The URL being fetched
+        headers: Optional response headers containing content-type
+        
+    Returns:
+        Detected content type (e.g., 'pdf', 'docx', 'pptx', 'html', 'text')
+    """
+    # First check content-type header if available
+    if headers and 'content-type' in headers:
+        content_type = headers['content-type'].lower()
+        if 'pdf' in content_type:
+            return 'pdf'
+        elif 'wordprocessingml.document' in content_type or 'msword' in content_type:
+            return 'docx'
+        elif 'presentationml.presentation' in content_type or 'powerpoint' in content_type:
+            return 'pptx'
+        elif 'text/html' in content_type:
+            return 'html'
+        elif 'text/plain' in content_type:
+            return 'text'
+    
+    # Fall back to URL extension
+    ext = Path(urlparse(url).path).suffix.lower()
+    if ext in ['.pdf']:
+        return 'pdf'
+    elif ext in ['.docx', '.doc']:
+        return 'docx'
+    elif ext in ['.pptx', '.ppt']:
+        return 'pptx'
+    elif ext in ['.html', '.htm']:
+        return 'html'
+    elif ext in ['.txt']:
+        return 'text'
+    
+    # Default to HTML if no specific type detected
+    return 'html'
+
 def choose_best_result(results: list) -> Tuple[str, str]:
     """Choose the best result based on multiple quality criteria."""
     # Filter out empty results
@@ -310,45 +447,13 @@ def choose_best_result(results: list) -> Tuple[str, str]:
 async def fetch_url_with_multiple_methods(url: str, user_agent: str) -> Tuple[str, str]:
     """
     Fetch the URL using multiple methods and return the best result.
+    Supports various file formats including PDF, DOCX, PPTX, and HTML.
     """
     extracted_texts = {}
-    
-    # Method 1: Selenium/undetected-chromedriver extraction
-    logger.info("Attempting to fetch URL with Selenium/undetected-chromedriver: %s", url)
-    screenshot_bytes, page_source = _capture_screenshot(url)
-    if page_source:
-        try:
-            soup = BeautifulSoup(page_source, "html.parser")
-            for element in soup(["script", "style", "header", "footer", "nav"]):
-                element.decompose()
-            text_content = _cleanup_extracted_text(soup.get_text(separator="\n"))
-            extracted_texts["Method_1_Selenium_UC"] = text_content
-        except Exception as e:
-            logger.error("Failed to process page source: %s", str(e))
-            extracted_texts["Method_1_Selenium_UC"] = ""
-    else:
-        extracted_texts["Method_1_Selenium_UC"] = ""
+    content_type = None
+    raw_content = None
 
-    # Method 2: OCR with pytesseract on the screenshot
-    if screenshot_bytes:
-        try:
-            text_ocr = _extract_text_with_pytesseract(screenshot_bytes)
-            extracted_texts["Method_2_Pytesseract_OCR"] = text_ocr
-        except Exception as e:
-            logger.error("Failed to extract text with OCR: %s", str(e))
-            extracted_texts["Method_2_Pytesseract_OCR"] = ""
-    else:
-        extracted_texts["Method_2_Pytesseract_OCR"] = ""
-
-    # Method 3: HTML extraction using requests as fallback
-    try:
-        text_requests = extract_html_with_requests(url)
-        extracted_texts["Method_3_HTML_Requests"] = text_requests
-    except Exception as e:
-        logger.error("Failed to extract HTML with requests: %s", str(e))
-        extracted_texts["Method_3_HTML_Requests"] = ""
-
-    # Method 4: Original method from the existing code
+    # Try to fetch content first with httpx to detect content type
     try:
         from httpx import AsyncClient, HTTPError
         async with AsyncClient() as client:
@@ -359,27 +464,100 @@ async def fetch_url_with_multiple_methods(url: str, user_agent: str) -> Tuple[st
                 timeout=30,
             )
             if response.status_code < 400:
-                raw_content = response.text
-                content_type = response.headers.get("content-type", "")
-                is_page_html = (
-                    "<html" in raw_content[:100] or "text/html" in content_type or not content_type
-                )
-                if is_page_html:
-                    extracted_texts["Method_4_Original"] = extract_content_from_html(raw_content)
-                else:
-                    extracted_texts["Method_4_Original"] = raw_content
-            else:
-                extracted_texts["Method_4_Original"] = ""
+                content_type = _get_content_type(url, dict(response.headers))
+                raw_content = response.content  # Get raw bytes for file parsing
+                logger.info(f"Detected content type: {content_type}")
     except Exception as e:
-        logger.error("Failed to extract content with original method: %s", str(e))
-        extracted_texts["Method_4_Original"] = ""
+        logger.error("Failed to fetch with httpx: %s", str(e))
+
+    # Handle document formats (PDF, DOCX, PPTX, TXT)
+    if content_type in ['pdf', 'docx', 'pptx', 'text']:
+        logger.info(f"Processing as {content_type.upper()} document")
+        
+        # Try parsing with httpx response first
+        if raw_content:
+            if content_type == 'pdf':
+                extracted_texts["Direct_PDF"] = _parse_pdf(raw_content)
+            elif content_type == 'docx':
+                extracted_texts["Direct_DOCX"] = _parse_docx(raw_content)
+            elif content_type == 'pptx':
+                extracted_texts["Direct_PPTX"] = _parse_pptx(raw_content)
+            elif content_type == 'text':
+                try:
+                    extracted_texts["Direct_Text"] = raw_content.decode('utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        extracted_texts["Direct_Text"] = raw_content.decode('latin-1')
+                    except UnicodeDecodeError:
+                        logger.error("Failed to decode text with both UTF-8 and Latin-1")
+
+        # Try requests as fallback for document files
+        try:
+            response = requests.get(url, headers={"User-Agent": user_agent}, timeout=30)
+            if response.status_code == 200:
+                content = response.content
+                if content_type == 'pdf':
+                    extracted_texts["Requests_PDF"] = _parse_pdf(content)
+                elif content_type == 'docx':
+                    extracted_texts["Requests_DOCX"] = _parse_docx(content)
+                elif content_type == 'pptx':
+                    extracted_texts["Requests_PPTX"] = _parse_pptx(content)
+                elif content_type == 'text':
+                    try:
+                        extracted_texts["Requests_Text"] = content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            extracted_texts["Requests_Text"] = content.decode('latin-1')
+                        except UnicodeDecodeError:
+                            logger.error("Failed to decode text with both UTF-8 and Latin-1")
+        except Exception as e:
+            logger.error("Failed to fetch document with requests: %s", str(e))
+
+    else:  # HTML or unknown content type - use existing methods
+        logger.info("Processing as HTML/web content")
+        
+        # Method 1: Selenium/undetected-chromedriver extraction
+        logger.info("Attempting to fetch URL with Selenium/undetected-chromedriver: %s", url)
+        screenshot_bytes, page_source = _capture_screenshot(url)
+        if page_source:
+            try:
+                soup = BeautifulSoup(page_source, "html.parser")
+                for element in soup(["script", "style", "header", "footer", "nav"]):
+                    element.decompose()
+                text_content = _cleanup_extracted_text(soup.get_text(separator="\n"))
+                extracted_texts["Browser"] = text_content
+            except Exception as e:
+                logger.error("Failed to process page source: %s", str(e))
+
+        # Method 2: OCR with pytesseract on the screenshot (useful for image-based content)
+        if screenshot_bytes:
+            try:
+                text_ocr = _extract_text_with_pytesseract(screenshot_bytes)
+                extracted_texts["OCR"] = text_ocr
+            except Exception as e:
+                logger.error("Failed to extract text with OCR: %s", str(e))
+
+        # Method 3: HTML extraction using requests
+        try:
+            text_requests = extract_html_with_requests(url)
+            extracted_texts["HTML"] = text_requests
+        except Exception as e:
+            logger.error("Failed to extract HTML with requests: %s", str(e))
+
+        # Method 4: Original HTML processing
+        if raw_content is not None:
+            try:
+                if content_type == 'html':
+                    extracted_texts["HTML_Original"] = extract_content_from_html(raw_content.decode('utf-8', errors='replace'))
+            except Exception as e:
+                logger.error("Failed to extract content with original method: %s", str(e))
 
     # Choose the best result
     best_method, best_text = choose_best_result(list(extracted_texts.items()))
     logger.info("Selected extraction method: %s", best_method)
 
-    # Return the best result with a prefix indicating the method used
-    prefix = f"Content extracted using {best_method}:\n\n"
+    # Return the best result with a prefix indicating the method and content type
+    prefix = f"Content extracted using {best_method} (detected type: {content_type}):\n\n"
     return best_text, prefix
 
 
