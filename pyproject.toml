@@ -3,9 +3,9 @@ name = "mcp-server-fetch"
 version = "0.6.2"
 description = "A Model Context Protocol server providing tools to fetch and convert web content for usage by LLMs"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [{ name = "Anthropic, PBC." }]
-maintainers = [{ name = "Jack Adamson", email = "jadamson@anthropic.com" }]
+maintainers = [{ name = "Maarten Smeets", email = "wisp1980@gmail.com" }]
 keywords = ["http", "mcp", "llm", "automation"]
 license = { text = "MIT" }
 classifiers = [
@@ -13,7 +13,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     "setuptools>=68.0.0",
