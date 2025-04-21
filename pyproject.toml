@@ -42,9 +42,9 @@ dependencies = [
     "python-pptx>=0.6.21"
 ]
 
-[[project.urls]]
-"Homepage" = "https://github.com/MaartenSmeets/mcp-server-fetch"
-"Bug Tracker" = "https://github.com/MaartenSmeets/mcp-server-fetch/issues"
+[project.urls]
+Homepage = "https://github.com/MaartenSmeets/mcp-server-fetch"
+Bug-Tracker = "https://github.com/MaartenSmeets/mcp-server-fetch/issues"
 
 [project.scripts]
 mcp-server-fetch = "mcp_server_fetch:main"
