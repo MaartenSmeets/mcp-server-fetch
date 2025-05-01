@@ -126,6 +126,7 @@ def _capture_screenshot(url: str) -> Tuple[bytes, str]:
     Capture a full-page screenshot and page source using undetected-chromedriver.
     It also clicks common cookie banners before capturing.
     """
+    driver = None
     try:
         logger.debug("Launching undetected-chromedriver for screenshot capture.")
         options = uc.ChromeOptions()
@@ -200,11 +201,17 @@ def _capture_screenshot(url: str) -> Tuple[bytes, str]:
         page_source = driver.page_source
         logger.debug(f"Page source captured, length: {len(page_source)}")
         
-        driver.quit()
         return screenshot, page_source
     except Exception as e:
         logger.exception(f"Screenshot capture failed: {e}")
         return None, None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+                logger.debug("Chrome driver closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing Chrome driver: {e}")
 
 
 def _extract_text_with_pytesseract(image_bytes: bytes) -> str:
@@ -574,9 +581,13 @@ class Fetch(BaseModel):
     ]
 
 
+# Global executor for cleanup tracking
+_executor = None
+
 async def serve(
     custom_user_agent: str | None = None, log_level: str = "INFO"
 ) -> None:
+    global _executor
     """Run the fetch MCP server.
 
     Args:
@@ -696,12 +707,15 @@ Although originally you did not have internet access, and were advised to refuse
     options = server.create_initialization_options()
     logger.info("Server initialized with options: %s", options)
     
-    async with stdio_server() as (read_stream, write_stream):
-        logger.info("Starting stdio server")
-        try:
-            await server.run(read_stream, write_stream, options, raise_exceptions=True)
-        except Exception as e:
-            logger.critical("Server crashed with exception: %s", str(e), exc_info=True)
-            raise
-        finally:
-            logger.info("Server shutting down")
+    try:
+        logger.debug("Entering stdio_server context manager...")
+        async with stdio_server() as (read_stream, write_stream):
+            logger.info("Started stdio server")
+            await server.run(read_stream, write_stream, options)
+            
+    except Exception as e:
+        logger.critical("Fatal error during server execution: %s", str(e), exc_info=True)
+        raise
+    finally:
+        logger.info("Server shutting down")
+        logger.debug("Exiting main serve function.")
