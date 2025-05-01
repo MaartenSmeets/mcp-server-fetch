@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
+    tini \
     wget \
     gnupg \
     lsb-release \
@@ -86,7 +87,8 @@ RUN pip install --no-cache-dir .
 VOLUME ["/app/logs", "/app/weights", "/app/output"]
 
 # Set the entrypoint to the installed command with logging enabled
-ENTRYPOINT ["mcp-server-fetch", "--log-level", "INFO", "--log-file", "/app/logs/mcp-fetch.log"]
+# Use tini as the entrypoint to handle signals properly
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default command can be overridden
-CMD []
+# Default command to run the server (executed by tini)
+CMD ["mcp-server-fetch", "--log-level", "INFO", "--log-file", "/app/logs/mcp-fetch.log"]
