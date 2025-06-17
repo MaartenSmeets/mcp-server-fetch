@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/maartensmeets-mcp-server-fetch-badge.png)](https://mseep.ai/app/maartensmeets-mcp-server-fetch)
+
 # Fetch MCP Server
 ![Fetch MCP Logo](https://github.com/MaartenSmeets/mcp-server-fetch/blob/main/logo.png)
 
